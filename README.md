@@ -18,7 +18,7 @@ A modern, "Liquid Glass" Pomodoro timer with an integrated To-Do list.
 
 ## Download / Run
 - **From source build output**: `dist/PomodoroTimer.exe`
-- **For sharing**: Publish `dist/PomodoroTimer.exe` in a GitHub Release (recommended).
+- **For Download**: Download directly from [releases](https://github.com/F14v1o/Liquidoro-Timer/releases/tag/v.1.0.0)
 
 ## Development
 - **Language**: Python 3.11
