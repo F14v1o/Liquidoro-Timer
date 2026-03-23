@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# Local IDE files
+.cursor/
+.vscode/
+
+# OS
+Thumbs.db
+Desktop.ini
