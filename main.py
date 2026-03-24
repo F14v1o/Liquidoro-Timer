@@ -1,7 +1,7 @@
 import sys
 import os
 import json
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve, QRectF, QUrl
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve, QRectF, QUrl, QEvent, QPoint
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QLineEdit, QCheckBox, 
                              QScrollArea, QFrame, QSystemTrayIcon, QMenu,
@@ -25,11 +25,13 @@ class TaskItem(QFrame):
     def __init__(self, text, checked=False, parent=None):
         super().__init__(parent)
         self.setObjectName("TaskItem")
-        self.setFixedHeight(50)
+        self.setMinimumHeight(50)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.setMouseTracking(True)
         
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 0, 15, 0)
+        layout.setContentsMargins(15, 8, 15, 8)
+        layout.setSpacing(10)
         
         self.checkbox = QCheckBox()
         self.checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -37,6 +39,8 @@ class TaskItem(QFrame):
         
         self.label = QLabel(text)
         self.label.setFont(QFont("Inter", 11))
+        self.label.setWordWrap(True)
+        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.label.setStyleSheet("color: #E0E0E0;")
         
         # Reminder Icon
@@ -114,6 +118,8 @@ class PomodoroTimer(AcrylicWindow):
         # Customizing the title bar for frameless experience
         self.titleBar.hide() 
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        # Enable true edge/corner resizing on frameless window.
+        self.setResizeEnabled(True)
         
         translucent_attr = get_translucent_background_attribute()
         if translucent_attr is not None:
@@ -140,8 +146,14 @@ class PomodoroTimer(AcrylicWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_timer)
         self.drag_pos = None
+        self.current_layout_mode = None
         self.focus_drag_start_global = None
         self.focus_drag_window_start = None
+        self.resize_margin = 8
+        self.resize_edges = None
+        self.resize_start_global = None
+        self.resize_start_geometry = None
+        self._using_override_cursor = False
         self.alarm_clip_duration_ms = 11000
         self.alarm_loop_timer = QTimer(self)
         self.alarm_loop_timer.setSingleShot(True)
@@ -154,6 +166,7 @@ class PomodoroTimer(AcrylicWindow):
         self.alarm_active = False
         
         self.init_ui()
+        self.install_resize_event_filters()
         self.load_tasks()
         self.setup_shortcuts()
         self.setup_tray()
@@ -390,8 +403,8 @@ class PomodoroTimer(AcrylicWindow):
 
         # Right Pane: To-Do
         self.todo_pane = QFrame()
-        self.todo_pane.setMinimumWidth(230)
-        self.todo_pane.setMaximumWidth(440)
+        self.todo_pane.setMinimumWidth(280)
+        self.todo_pane.setMaximumWidth(540)
         self.todo_pane.setObjectName("TodoPane")
         self.todo_pane.setStyleSheet("""
             #TodoPane {
@@ -427,11 +440,160 @@ class PomodoroTimer(AcrylicWindow):
         todo_layout.addWidget(self.task_input)
         todo_layout.addWidget(self.scroll_area)
 
-        self.main_layout.addWidget(self.timer_pane, 7)
-        self.main_layout.addWidget(self.todo_pane, 3)
+        self.main_layout.addWidget(self.timer_pane, 6)
+        self.main_layout.addWidget(self.todo_pane, 4)
         self.container_layout.addWidget(self.header_bar)
         self.container_layout.addLayout(self.main_layout)
         self.update_responsive_ui()
+
+    def install_resize_event_filters(self):
+        self.setMouseTracking(True)
+        self._set_mouse_tracking_recursive(self)
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def _set_mouse_tracking_recursive(self, widget):
+        widget.setMouseTracking(True)
+        for child in widget.findChildren(QWidget):
+            child.setMouseTracking(True)
+
+    def _event_window_pos(self, watched, event):
+        global_pos = watched.mapToGlobal(event.position().toPoint())
+        return self.mapFromGlobal(global_pos), global_pos
+
+    def _detect_resize_edges(self, pos):
+        if self.is_focus_mode:
+            return None
+        x, y = pos.x(), pos.y()
+        w, h = self.width(), self.height()
+        margin = self.resize_margin
+
+        left = x <= margin
+        right = x >= w - margin
+        top = y <= margin
+        bottom = y >= h - margin
+
+        edges = []
+        if left:
+            edges.append(Qt.Edge.LeftEdge)
+        if right:
+            edges.append(Qt.Edge.RightEdge)
+        if top:
+            edges.append(Qt.Edge.TopEdge)
+        if bottom:
+            edges.append(Qt.Edge.BottomEdge)
+        return edges or None
+
+    def _cursor_for_edges(self, edges):
+        edge_set = set(edges or [])
+        if {Qt.Edge.LeftEdge, Qt.Edge.TopEdge} == edge_set or {Qt.Edge.RightEdge, Qt.Edge.BottomEdge} == edge_set:
+            return Qt.CursorShape.SizeFDiagCursor
+        if {Qt.Edge.RightEdge, Qt.Edge.TopEdge} == edge_set or {Qt.Edge.LeftEdge, Qt.Edge.BottomEdge} == edge_set:
+            return Qt.CursorShape.SizeBDiagCursor
+        if Qt.Edge.LeftEdge in edge_set or Qt.Edge.RightEdge in edge_set:
+            return Qt.CursorShape.SizeHorCursor
+        if Qt.Edge.TopEdge in edge_set or Qt.Edge.BottomEdge in edge_set:
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
+
+    def _apply_resize(self, global_pos):
+        if not self.resize_edges or self.resize_start_geometry is None or self.resize_start_global is None:
+            return
+        delta = global_pos - self.resize_start_global
+        geom = self.resize_start_geometry
+
+        left = geom.left()
+        top = geom.top()
+        right = geom.right()
+        bottom = geom.bottom()
+
+        if Qt.Edge.LeftEdge in self.resize_edges:
+            left += delta.x()
+        if Qt.Edge.RightEdge in self.resize_edges:
+            right += delta.x()
+        if Qt.Edge.TopEdge in self.resize_edges:
+            top += delta.y()
+        if Qt.Edge.BottomEdge in self.resize_edges:
+            bottom += delta.y()
+
+        new_width = right - left + 1
+        new_height = bottom - top + 1
+
+        min_w, min_h = self.minimumWidth(), self.minimumHeight()
+        max_w, max_h = self.maximumWidth(), self.maximumHeight()
+
+        if new_width < min_w:
+            if Qt.Edge.LeftEdge in self.resize_edges:
+                left = right - min_w + 1
+            else:
+                right = left + min_w - 1
+            new_width = min_w
+        elif new_width > max_w:
+            if Qt.Edge.LeftEdge in self.resize_edges:
+                left = right - max_w + 1
+            else:
+                right = left + max_w - 1
+            new_width = max_w
+
+        if new_height < min_h:
+            if Qt.Edge.TopEdge in self.resize_edges:
+                top = bottom - min_h + 1
+            else:
+                bottom = top + min_h - 1
+            new_height = min_h
+        elif new_height > max_h:
+            if Qt.Edge.TopEdge in self.resize_edges:
+                top = bottom - max_h + 1
+            else:
+                bottom = top + max_h - 1
+            new_height = max_h
+
+        self.setGeometry(left, top, new_width, new_height)
+
+    def _set_resize_cursor(self, cursor_shape):
+        if cursor_shape == Qt.CursorShape.ArrowCursor:
+            if self._using_override_cursor:
+                QApplication.restoreOverrideCursor()
+                self._using_override_cursor = False
+            return
+        if self._using_override_cursor:
+            QApplication.changeOverrideCursor(cursor_shape)
+        else:
+            QApplication.setOverrideCursor(cursor_shape)
+            self._using_override_cursor = True
+
+    def eventFilter(self, watched, event):
+        if not isinstance(watched, QWidget):
+            return super().eventFilter(watched, event)
+
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            window_pos, global_pos = self._event_window_pos(watched, event)
+            edges = self._detect_resize_edges(window_pos)
+            if edges:
+                self.resize_edges = edges
+                self.resize_start_global = global_pos
+                self.resize_start_geometry = self.geometry()
+                return True
+
+        if event.type() == QEvent.Type.MouseMove:
+            window_pos, global_pos = self._event_window_pos(watched, event)
+            if self.resize_edges and event.buttons() & Qt.MouseButton.LeftButton:
+                self._apply_resize(global_pos)
+                return True
+
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                edges = self._detect_resize_edges(window_pos)
+                self._set_resize_cursor(self._cursor_for_edges(edges))
+
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            if self.resize_edges:
+                self.resize_edges = None
+                self.resize_start_global = None
+                self.resize_start_geometry = None
+                self._set_resize_cursor(Qt.CursorShape.ArrowCursor)
+                return True
+
+        return super().eventFilter(watched, event)
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+Shift+P"), self, activated=self.toggle_always_on_top)
@@ -481,6 +643,10 @@ class PomodoroTimer(AcrylicWindow):
         )
 
     def apply_layout_mode(self):
+        layout_mode = "focus" if self.is_focus_mode else "clock" if self.is_clock_mode else "compact" if self.is_compact else "normal"
+        mode_changed = layout_mode != self.current_layout_mode
+        self.current_layout_mode = layout_mode
+
         in_clock_like_mode = self.is_clock_mode or self.is_focus_mode
         show_todo = (not self.is_compact) and (not self.is_clock_mode) and (not self.is_focus_mode)
 
@@ -492,7 +658,7 @@ class PomodoroTimer(AcrylicWindow):
 
         self.header_bar.setVisible(not self.is_focus_mode)
 
-        if self.is_focus_mode:
+        if layout_mode == "focus":
             self.container_layout.setContentsMargins(8, 6, 8, 8)
             self.main_layout.setContentsMargins(0, 0, 0, 0)
             self.main_layout.setSpacing(0)
@@ -501,36 +667,48 @@ class PomodoroTimer(AcrylicWindow):
             self.timer_label.setFont(QFont("Inter", 54, QFont.Weight.Bold))
             self.setMinimumSize(*self.focus_size)
             self.setMaximumSize(*self.focus_size)
-            self.resize(*self.focus_size)
-            self.move_focus_to_top_right()
-        elif self.is_clock_mode:
+            if mode_changed:
+                self.resize(*self.focus_size)
+                self.move_focus_to_top_right()
+        elif layout_mode == "clock":
             self.container_layout.setContentsMargins(14, 12, 14, 14)
             self.main_layout.setContentsMargins(8, 6, 8, 8)
             self.main_layout.setSpacing(30)
             self.timer_pane.layout().setContentsMargins(9, 9, 9, 9)
             self.timer_pane.layout().setSpacing(20)
-            self.setMinimumSize(200, 120)
-            self.setMaximumSize(16777215, 16777215)
-            self.resize(*self.clock_size)
-        elif self.is_compact:
+            self.setMinimumSize(360, 220)
+            self.apply_maximum_to_screen()
+            if mode_changed:
+                self.resize(*self.clock_size)
+        elif layout_mode == "compact":
             self.container_layout.setContentsMargins(14, 12, 14, 14)
             self.main_layout.setContentsMargins(8, 6, 8, 8)
             self.main_layout.setSpacing(30)
             self.timer_pane.layout().setContentsMargins(9, 9, 9, 9)
             self.timer_pane.layout().setSpacing(20)
-            self.setMinimumSize(420, 320)
-            self.setMaximumSize(16777215, 16777215)
-            self.resize(*self.compact_size)
+            self.setMinimumSize(680, 420)
+            self.apply_maximum_to_screen()
+            if mode_changed:
+                self.resize(*self.compact_size)
         else:
             self.container_layout.setContentsMargins(14, 12, 14, 14)
             self.main_layout.setContentsMargins(8, 6, 8, 8)
             self.main_layout.setSpacing(30)
             self.timer_pane.layout().setContentsMargins(9, 9, 9, 9)
             self.timer_pane.layout().setSpacing(20)
-            self.setMinimumSize(600, 380)
-            self.setMaximumSize(16777215, 16777215)
-            self.resize(*self.normal_size)
+            self.setMinimumSize(780, 460)
+            self.apply_maximum_to_screen()
+            if mode_changed:
+                self.resize(*self.normal_size)
         self.update_responsive_ui()
+
+    def apply_maximum_to_screen(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.setMaximumSize(16777215, 16777215)
+            return
+        available = screen.availableGeometry()
+        self.setMaximumSize(available.width(), available.height())
 
     def move_focus_to_top_right(self):
         screen = self.screen() or QApplication.primaryScreen()
@@ -560,6 +738,18 @@ class PomodoroTimer(AcrylicWindow):
         else:
             timer_font_size = max(52, min(132, int(min(timer_width * 0.22, timer_height * 0.50))))
         self.timer_label.setFont(QFont("Inter", timer_font_size, QFont.Weight.Bold))
+
+        button_height = max(40, min(56, int(timer_height * 0.11)))
+        self.start_btn.setMinimumHeight(button_height)
+        self.reset_btn.setMinimumHeight(button_height)
+        for btn in self.preset_buttons:
+            btn.setMinimumHeight(max(34, int(button_height * 0.82)))
+
+        todo_font_size = max(10, min(14, int(self.todo_pane.width() / 34)))
+        for i in range(self.tasks_layout.count()):
+            widget = self.tasks_layout.itemAt(i).widget()
+            if isinstance(widget, TaskItem):
+                widget.label.setFont(QFont("Inter", todo_font_size))
 
         # Right pane width is controlled by layout stretch factors.
 
@@ -871,6 +1061,9 @@ class PomodoroTimer(AcrylicWindow):
         QLabel.mouseDoubleClickEvent(self.timer_label, event)
 
     def mousePressEvent(self, event):
+        if not self.is_focus_mode:
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
@@ -878,6 +1071,9 @@ class PomodoroTimer(AcrylicWindow):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if not self.is_focus_mode:
+            super().mouseMoveEvent(event)
+            return
         if event.buttons() & Qt.MouseButton.LeftButton and self.drag_pos is not None:
             self.move(event.globalPosition().toPoint() - self.drag_pos)
             event.accept()
