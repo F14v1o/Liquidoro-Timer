@@ -908,9 +908,8 @@ class PomodoroTimer(AcrylicWindow):
         bundled_path = os.path.join(getattr(sys, "_MEIPASS", app_dir), "Lofi.mp3")
         local_path = os.path.join(app_dir, "Lofi.mp3")
         user_download_path = os.path.join(os.path.expanduser("~"), "Downloads", "Lofi.mp3")
-        explicit_download_path = r"C:\Users\Flavi\Downloads\Lofi.mp3"
 
-        for candidate in (bundled_path, local_path, explicit_download_path, user_download_path):
+        for candidate in (bundled_path, local_path, user_download_path):
             if os.path.exists(candidate):
                 return candidate
         return None
